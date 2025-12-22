@@ -1,0 +1,6 @@
+{
+    "MAX_WARNINGS": 2,
+    "DEFAULT_ACTION": "MUTE",
+    "MUTE_DURATION": 60,
+    "MAX_PERSONAS": 5
+}
