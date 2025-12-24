@@ -2,6 +2,7 @@ services:
   - type: web
     name: atlas-ai-bot
     runtime: python
+    plan: free # 👈 اضافه شدن این خط برای رایگان شدن
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python main.py"
     envVars:
@@ -14,4 +15,4 @@ services:
       - key: LOG_CHANNEL_ID
         sync: false
       - key: PORT
-        value: 8080
+        value: 10000
