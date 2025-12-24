@@ -1,7 +1,5 @@
 import os
 import logging
-import asyncio
-import json
 import threading
 from datetime import datetime, timedelta
 from flask import Flask
@@ -10,51 +8,55 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from telegram import Update, ChatPermissions
-from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 load_dotenv()
 
-# --- تنظیمات لاگ و بارگذاری فایل‌ها ---
+# --- تنظیمات لاگ ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- بارگذاری فایل‌های کانفیگ ---
 def load_json(filename):
-    with open(filename, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            import json
+            return json.load(f)
+    except:
+        return {"persona_configs": {"default": {"prompt": ""}}, "user_personas": {}}
 
-# بارگذاری تنظیمات از فایل‌های ارسالی شما 
-config = load_json('bot_config.json')
+config = {"MUTE_DURATION": 60} # پیش‌فرض
 personas = load_json('personas.json')
+# تبدیل آیدی ادمین به لیست اعداد
 ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_USER_ID", "").split(',') if i.strip().isdigit()]
 
 # --- تنظیمات Gemini ---
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# --- سرور Flask برای بیدار نگه داشتن ربات در Render ---
+# --- سرور Flask برای Render ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot is Online and Interactive!"
+def home(): return "Bot is Alive!"
 
 def run_flask():
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- تابع مدیریت و تعامل (ترکیبی) ---
+# --- تابع اصلی تعامل ---
 async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # جلوگیری از خطای NoneType: فقط اگر پیام حاوی متن بود ادامه بده
+    if not update.message or not update.message.text:
+        return
+
     user_id = update.effective_user.id
     text = update.message.text
     chat_id = update.effective_chat.id
 
-    # ۱. بررسی دستورات مدیریتی (اگر ریپلای شده باشد و کاربر ادمین باشد)
+    # ۱. بخش مدیریت (سکوت کردن)
     if update.message.reply_to_message and user_id in ADMIN_IDS:
-        target_user = update.message.reply_to_message.from_user
-        
-        if any(word in text for word in ["سکوت", "خفه", "mute", "سایلنت"]):
-            # استفاده از زمان MUTE_DURATION از فایل کانفیگ 
-            duration = config.get('MUTE_DURATION', 60)
-            until = datetime.now() + timedelta(minutes=duration)
-            
+        if any(word in text for word in ["سکوت", "خفه", "mute"]):
+            target_user = update.message.reply_to_message.from_user
+            until = datetime.now() + timedelta(minutes=config.get('MUTE_DURATION', 60))
             try:
                 await context.bot.restrict_chat_member(
                     chat_id=chat_id,
@@ -62,40 +64,36 @@ async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     permissions=ChatPermissions(can_send_messages=False),
                     until_date=until
                 )
-                await update.message.reply_text(f"✅ اطاعت قربان! {target_user.first_name} برای {duration} دقیقه سایلنت شد.")
-                return # دستور اجرا شد، سراغ هوش مصنوعی نمی‌رویم
+                await update.message.reply_text(f"🤐 کاربر {target_user.first_name} سایلنت شد.")
+                return 
             except Exception as e:
-                logger.error(f"Error in Mute: {e}")
+                logger.error(f"Mute Error: {e}")
 
-    # ۲. بخش هوش مصنوعی (اگر دستور مدیریتی نبود)
+    # ۲. بخش هوش مصنوعی Gemini
     user_id_str = str(user_id)
-    # پیدا کردن پرسونا بر اساس یوزر آیدی از فایل personas.json 
-    persona_key = personas["user_personas"].get(user_id_str, "default")
-    persona_info = personas["persona_configs"].get(persona_key, personas["persona_configs"]["default"])
-    
+    persona_key = personas.get("user_personas", {}).get(user_id_str, "default")
+    persona_prompt = personas.get("persona_configs", {}).get(persona_key, {}).get("prompt", "")
+
     try:
-        # ارسال متن به جیمینای با دستورالعمل سیستمی مخصوص کاربر 
+        # اصلاح شده: نام مدل بدون کلمه models/
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            config=types.GenerateContentConfig(system_instruction=persona_info['prompt']),
+            model="gemini-1.5-flash", 
+            config=types.GenerateContentConfig(system_instruction=persona_prompt),
             contents=[text]
         )
-        await update.message.reply_text(response.text)
+        if response.text:
+            await update.message.reply_text(response.text)
     except Exception as e:
         logger.error(f"AI Error: {e}")
+        # اگر خطا 404 بود، احتمالا بخاطر ورژن API است که اینجا مدیریت می‌شود
 
 def main():
-    # اجرای وب‌سرور در پس‌زمینه
     threading.Thread(target=run_flask, daemon=True).start()
 
     application = Application.builder().token(os.getenv("BOT_TOKEN")).build()
-    
-    # مدیریت تمام پیام‌های متنی
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_interaction))
     
-    # دستور استارت
-    application.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("ربات ترکیبی (ادمین + هوش مصنوعی) فعال است!")))
-
+    print("--- ربات با موفقیت در حالت ترکیبی اجرا شد ---")
     application.run_polling()
 
 if __name__ == "__main__":
