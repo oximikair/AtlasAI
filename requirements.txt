@@ -1,7 +1,5 @@
-Flask
+python-telegram-bot --pre
+google-genai
+flask
 python-dotenv
 gunicorn
-google-genai>=0.15.0 
-pymongo>=4.6
-flask-cors
-
