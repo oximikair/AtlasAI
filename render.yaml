@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: atlas-ai-bot
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ADMIN_USER_ID
+        sync: false
+      - key: LOG_CHANNEL_ID
+        sync: false
+      - key: PORT
+        value: 8080
