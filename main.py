@@ -2,156 +2,101 @@ import os
 import logging
 import asyncio
 import json
-import io
-from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta, timezone
+import threading
+from datetime import datetime, timedelta
+from flask import Flask
 
-# --- 🚀 وابستگی‌های اضافی ---
 from dotenv import load_dotenv
-from PIL import Image
-
-# --- 🧠 وابستگی‌های جیمینای ---
 from google import genai
 from google.genai import types
+from telegram import Update, ChatPermissions
+from telegram.constants import ParseMode
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember, ReplyKeyboardMarkup, KeyboardButton
-# 🟢 فیکس: اضافه کردن import برای مدیریت خطای رایج تلگرام
-from telegram.error import BadRequest, TelegramError 
-from telegram.constants import ChatType, ParseMode
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-)
-
-# 👈🏻 لود کردن متغیرهای محیطی از فایل .env
 load_dotenv()
 
-# --- 📝 تنظیمات لاگ‌گیری ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# --- تنظیمات لاگ و بارگذاری فایل‌ها ---
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 🟢 دستور چاپ برای اشکال‌زدایی فوری در Railway
-print("--- 🟢 Railway Initialization Check: Starting main.py Process ---")
+def load_json(filename):
+    with open(filename, 'r', encoding='utf-8') as f:
+        return json.load(f)
 
+# بارگذاری تنظیمات از فایل‌های ارسالی شما 
+config = load_json('bot_config.json')
+personas = load_json('personas.json')
+ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_USER_ID", "").split(',') if i.strip().isdigit()]
 
-# --- 🔒 تنظیمات و توکن‌ها (خوانده شده از .env شما) ---
+# --- تنظیمات Gemini ---
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-BOT_TOKEN: str = os.getenv("BOT_TOKEN", os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN"))
-GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY") or os.getenv("GEMINIAPIKEY")
+# --- سرور Flask برای بیدار نگه داشتن ربات در Render ---
+app = Flask(__name__)
+@app.route('/')
+def home(): return "Bot is Online and Interactive!"
 
-admin_id_str = os.getenv("ADMIN_USER_ID", "")
-ADMIN_IDS: List[int] = [int(i.strip()) for i in admin_id_str.split(',') if i.strip().isdigit()]
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
-# 🟢 متغیر جدید برای کانال لاگ
-LOG_CHANNEL_ID: Optional[str] = os.getenv("LOG_CHANNEL_ID") 
+# --- تابع مدیریت و تعامل (ترکیبی) ---
+async def handle_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text
+    chat_id = update.effective_chat.id
 
+    # ۱. بررسی دستورات مدیریتی (اگر ریپلای شده باشد و کاربر ادمین باشد)
+    if update.message.reply_to_message and user_id in ADMIN_IDS:
+        target_user = update.message.reply_to_message.from_user
+        
+        if any(word in text for word in ["سکوت", "خفه", "mute", "سایلنت"]):
+            # استفاده از زمان MUTE_DURATION از فایل کانفیگ 
+            duration = config.get('MUTE_DURATION', 60)
+            until = datetime.now() + timedelta(minutes=duration)
+            
+            try:
+                await context.bot.restrict_chat_member(
+                    chat_id=chat_id,
+                    user_id=target_user.id,
+                    permissions=ChatPermissions(can_send_messages=False),
+                    until_date=until
+                )
+                await update.message.reply_text(f"✅ اطاعت قربان! {target_user.first_name} برای {duration} دقیقه سایلنت شد.")
+                return # دستور اجرا شد، سراغ هوش مصنوعی نمی‌رویم
+            except Exception as e:
+                logger.error(f"Error in Mute: {e}")
 
-# ⚠️ اگر کلید جیمینای موجود نباشد، ربات اجرا نخواهد شد.
-if not GEMINI_API_KEY:
-    logger.error("❌ GEMINI_API_KEY در متغیرهای محیطی یافت نشد. ربات نمی‌تواند ادامه دهد.")
-    print("--- ❌ CRITICAL ERROR: GEMINI_API_KEY Missing ---") 
-
-
-# ---------------------------------------------------------------------
-# 🛎️ توابع کمکی و اصلی
-# ---------------------------------------------------------------------
-
-# 🟢 تابع notify_admin_of_message (اصلاح شده برای کانال و رفع خطای فرمت)
-async def notify_admin_of_message(message: str, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """ارسال پیام نظارتی به کانال لاگ."""
+    # ۲. بخش هوش مصنوعی (اگر دستور مدیریتی نبود)
+    user_id_str = str(user_id)
+    # پیدا کردن پرسونا بر اساس یوزر آیدی از فایل personas.json 
+    persona_key = personas["user_personas"].get(user_id_str, "default")
+    persona_info = personas["persona_configs"].get(persona_key, personas["persona_configs"]["default"])
     
-    target_id = LOG_CHANNEL_ID 
-    
-    if not target_id:
-        logger.warning("LOG_CHANNEL_ID تنظیم نشده است. ارسال لاگ امکان‌پذیر نیست.")
-        return
-
-    # 🟢 چاپ برای اشکال‌زدایی
-    print(f"--- 🟢 Trying to send log to Channel {target_id} ---")
-
     try:
-        await context.bot.send_message(
-            chat_id=target_id, 
-            text=message,
-            parse_mode=None # 👈🏻 فیکس: غیرفعال کردن ParseMode برای جلوگیری از خطای فرمت
+        # ارسال متن به جیمینای با دستورالعمل سیستمی مخصوص کاربر 
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            config=types.GenerateContentConfig(system_instruction=persona_info['prompt']),
+            contents=[text]
         )
-    except BadRequest as e:
-        logger.error(f"Error sending log to channel {target_id}: {e}")
-        print(f"--- 💥 Telegram Error: BadRequest to Channel {target_id} ({e}) ---")
-    except TelegramError as e:
-        logger.error(f"General Telegram Error sending log to channel {target_id}: {e}")
-        print(f"--- 💥 General Telegram Error to Channel {target_id} ({e}) ---")
+        await update.message.reply_text(response.text)
     except Exception as e:
-        logger.error(f"Unknown error notifying channel {target_id}: {e}")
-        print(f"--- 💥 Unknown Error to Channel {target_id} ({e}) ---")
+        logger.error(f"AI Error: {e}")
 
-# 💡 توابع هندلر (لطفاً توابع handle_start، get_command_aliases و ... را از فایل قبلی خود به اینجا کپی کنید.)
+def main():
+    # اجرای وب‌سرور در پس‌زمینه
+    threading.Thread(target=run_flask, daemon=True).start()
 
-async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # 💡 کدهای هندلر استارت خود را اینجا قرار دهید.
-    await update.message.reply_text("ربات فعال است.")
+    application = Application.builder().token(os.getenv("BOT_TOKEN")).build()
+    
+    # مدیریت تمام پیام‌های متنی
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_interaction))
+    
+    # دستور استارت
+    application.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("ربات ترکیبی (ادمین + هوش مصنوعی) فعال است!")))
 
-async def handle_gemini_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """هندلر اصلی پیام متنی: لاگ می‌گیرد و با Gemini پاسخ می‌دهد."""
-    # ⚠️ این تابع باید اولین کارش، فراخوانی notify_admin_of_message باشد.
-    user_info = f"@{update.effective_user.username}" if update.effective_user.username else f"User ID: {update.effective_user.id}"
-    message_content = update.message.text
-    # 🟢 پیام لاگ برای کانال
-    notification_message = f"**[ربات تلگرام]**\n\n**فرستنده:** {user_info}\n**محتوا:** {message_content}"
-    await notify_admin_of_message(notification_message, context) # 👈🏻 لاگ‌گیری
-    
-    # 💡 کدهای اصلی اتصال به Gemini برای پاسخ‌گویی را اینجا قرار دهید.
-    await update.message.reply_text("پیام نظارتی ارسال شد و اکنون منتظر پاسخ Gemini است...") 
-    pass # ادامه کدهای شما
-
-async def update_user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """این تابع آمارگیری است که موقتاً در main() غیرفعال شده است."""
-    pass
-
-
-def main() -> None:
-    """شروع به اجرای ربات (Polling) می‌کند."""
-
-    # 🟢 چاپ برای اشکال‌زدایی
-    print(f"--- 🔑 BOT_TOKEN status: {'Set' if BOT_TOKEN else 'Missing'} ---")
-    print(f"--- 🔑 LOG_CHANNEL_ID status: {'Set' if LOG_CHANNEL_ID else 'Missing'} ---")
-    
-    try:
-        # 1. ساخت Application 
-        application = Application.builder().token(BOT_TOKEN).build()
-    except Exception as e:
-        # اگر مشکلی در توکن یا ساخت Application بود، اینجا چاپ می‌شود.
-        print(f"--- 💥 CRITICAL ERROR in Application Build: {e} ---")
-        logger.error(f"CRITICAL ERROR in Application Build: {e}")
-        return # پایان برنامه
-
-    # 2. ثبت هندلرها
-    
-    # الف) هندلرهای دستورات (Commands)
-    
-    # 💡 تمام CommandHandlerهای خود را اینجا قرار دهید.
-    application.add_handler(CommandHandler("start", handle_start)) 
-    # ... (CommandHandlerهای قبلی خود را در اینجا قرار دهید.) ...
-    
-    
-    # ج) هندلر پیام‌های متنی (Text Messages)
-    
-    # 🥇 هندلر Gemini: فقط روی متن‌هایی که دستور نیستند اجرا می‌شود.
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_gemini_message))
-    
-    
-    # د) هندلر آمارگیری (General Updates)
-    
-    # ❌ هندلر آمارگیری که از filters.ALL استفاده می‌کرد، موقتاً کامنت شده است.
-    # application.add_handler(MessageHandler(filters.ALL, update_user_stats))
-    
-    
-    # 4. شروع Polling
-    logger.info("Telebot has started polling...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
