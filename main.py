@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 # --- متغیرهای محیطی ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_KEY")
-ELEVEN_KEY = os.environ.get("ELEVENLABS_KEY")
+ELEVEN_KEY = os.environ.get("dc19b835bcd3a48e6fd50f06c7c63c56593d9c7f853cd4f3ffcb1bc4ff662788")
 VOICE_ID = "21m00Tcm4lS96DGzAsAn" # صدای پیش‌فرض Bella (بسیار طبیعی برای فارسی و انگلیسی)
 
 user_ai_enabled = {} 
@@ -166,3 +166,4 @@ if __name__ == "__main__":
         
         logger.info("Atlas Bot Started Successfully!")
         application.run_polling(drop_pending_updates=True)
+
