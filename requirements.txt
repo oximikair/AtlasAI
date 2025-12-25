@@ -1,5 +1,6 @@
-python-telegram-bot --pre
-google-genai
+python-telegram-bot
+google-generativeai
 flask
 python-dotenv
 gunicorn
+httpx
