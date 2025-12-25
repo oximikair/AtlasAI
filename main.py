@@ -3,48 +3,44 @@ import logging
 import asyncio
 import time
 import httpx
-import re
 from flask import Flask
 from threading import Thread
 from google import genai
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-# تنظیمات لاگ برای مشاهده وضعیت در رندر
+# --- تنظیمات لاگ ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- متغیرهای محیطی ---
+# --- متغیرهای سیستمی ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_KEY")
 
-# نقشه زبان‌ها برای تشخیص در متن کاربر
+# لیست زبان‌ها برای تشخیص در دستور ترجمه
 LANG_MAP = {
     "انگلیسی": "en",
-    "فارسی": "fa",
     "آلمانی": "de",
     "فرانسوی": "fr",
     "عربی": "ar",
     "ترکی": "tr",
     "اسپانیایی": "es",
     "روسی": "ru",
-    "ایتالیایی": "it"
+    "ایتالیایی": "it",
+    "فارسی": "fa"
 }
 
+# --- بخش ترجمه (بدون نیاز به توکن) ---
 async def translate_text(text, target_lang_code):
-    """
-    تابع ترجمه با قابلیت رفع خطای تشخیص زبان خودکار
-    """
     try:
         async with httpx.AsyncClient() as client:
-            # تلاش اول با تشخیص خودکار زبان
+            # تلاش اول: تشخیص خودکار زبان مبدأ
             url = f"https://api.mymemory.translated.net/get?q={text}&langpair=auto|{target_lang_code}"
             response = await client.get(url, timeout=10.0)
             data = response.json()
             
-            # اگر سرور خطای زبان داد یا خروجی نامعتبر بود، فرض را بر انگلیسی می‌گذاریم
+            # اگر خطای زبان داد، فرض می‌کنیم متن ورودی انگلیسی است و دوباره تلاش می‌کنیم
             if response.status_code != 200 or "INVALID SOURCE LANGUAGE" in str(data):
-                logger.info("Auto-detect failed, retrying with English as source...")
                 url = f"https://api.mymemory.translated.net/get?q={text}&langpair=en|{target_lang_code}"
                 response = await client.get(url, timeout=10.0)
                 data = response.json()
@@ -52,32 +48,30 @@ async def translate_text(text, target_lang_code):
             return data["responseData"]["translatedText"]
     except Exception as e:
         logger.error(f"Translation Error: {e}")
-        return "⚠️ متأسفانه مشکلی در ارتباط با سرور ترجمه پیش آمده."
+        return "⚠️ متأسفانه مشکلی در سرور ترجمه پیش آمد."
 
+# --- بخش هوش مصنوعی (Gemini) ---
 async def get_ai_response(user_text):
-    """
-    اتصال به مدل Gemini با مدیریت خطای سهمیه
-    """
     try:
+        if not GEMINI_KEY: return "کلید API ست نشده است."
         client = genai.Client(api_key=GEMINI_KEY)
         response = client.models.generate_content(model="gemini-2.0-flash", contents=user_text)
         return response.text if response.text else "پاسخی دریافت نشد."
     except Exception as e:
-        error_msg = str(e)
-        logger.error(f"AI Error: {error_msg}")
-        if "429" in error_msg:
-            return "⏳ سهمیه پیام‌های اطلس تمام شده. لطفاً دقایقی دیگر امتحان کنید یا از بخش 'ترجمه' استفاده کنید."
-        return "❌ در حال حاضر امکان پاسخگویی وجود ندارد."
+        if "429" in str(e):
+            return "⏳ سهمیه اطلس تمام شده. برای ترجمه، روی متن ریپلای کنید و بنویسید 'ترجمه'."
+        return "❌ اطلس فعلاً در دسترس نیست."
 
+# --- مدیریت پیام‌ها ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     
     msg_text = update.message.text
     bot_obj = await context.bot.get_me()
 
-    # --- منطق ترجمه ---
+    # ۱. بررسی دستور ترجمه روی ریپلای (اولویت اول)
     if "ترجمه" in msg_text and update.message.reply_to_message:
-        target_code = "fa"  # پیش‌فرض
+        target_code = "fa" 
         target_name = "فارسی"
         
         for lang_name, lang_code in LANG_MAP.items():
@@ -90,10 +84,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if original_text:
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
             result = await translate_text(original_text, target_code)
-            await update.message.reply_text(f"✨ ترجمه به {target_name}:\n\n{result}")
-            return
+            await update.message.reply_text(f"✅ ترجمه به {target_name}:\n\n{result}")
+            return # کار تمام است، سراغ هوش مصنوعی نمی‌رود
 
-    # --- منطق هوش مصنوعی (فقط گروه یا ریپلای به بوت) ---
+    # ۲. منطق هوش مصنوعی (فقط در صورت منشن یا ریپلای به بوت)
     is_group = update.message.chat.type in ["group", "supergroup"]
     is_mentioned = f"@{bot_obj.username}" in msg_text
     is_reply_to_bot = (update.message.reply_to_message and update.message.reply_to_message.from_user.id == bot_obj.id)
@@ -106,29 +100,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply = await get_ai_response(clean_text)
     await update.message.reply_text(reply)
 
-# --- بخش وب‌سرور ---
+# --- وب‌سرور زنده نگهدار ---
 app = Flask(__name__)
 @app.route('/')
-def health(): return "Atlas Bot is Running!", 200
+def health(): return "Atlas is Online!", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- بخش اصلی اجرا ---
+# --- اجرای نهایی ---
 if __name__ == "__main__":
-    # ۱. اجرای وب‌سرور در پس‌زمینه
     Thread(target=run_flask, daemon=True).start()
     
-    # ۲. وقفه برای بسته شدن نشست‌های قبلی در رندر
-    logger.info("Waiting 20 seconds for clean startup...")
+    # وقفه ۲۰ ثانیه‌ای برای اطمینان از بسته شدن نسخه قبلی در Render
+    logger.info("Starting up in 20 seconds...")
     time.sleep(20)
     
     if BOT_TOKEN:
         application = Application.builder().token(BOT_TOKEN).build()
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
-        logger.info("Bot is starting polling...")
+        logger.info("Atlas Bot is now polling...")
         application.run_polling(drop_pending_updates=True)
     else:
-        logger.error("BOT_TOKEN not found!")
+        logger.error("No BOT_TOKEN found in Environment Variables!")
