@@ -94,7 +94,9 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_interaction))
     
     print("--- ربات با موفقیت در حالت ترکیبی اجرا شد ---")
-    application.run_polling()
+
+    application.run_polling(drop_pending_updates=True, close_loop=True)
 
 if __name__ == "__main__":
     main()
+
