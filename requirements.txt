@@ -1,6 +1,4 @@
 python-telegram-bot
-google-generativeai
+google-genai
 flask
-python-dotenv
-gunicorn
 httpx
