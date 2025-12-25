@@ -1,8 +1,4 @@
-import os
-import logging
-import asyncio
-import time
-import httpx
+import os, logging, asyncio, time, httpx
 from flask import Flask
 from threading import Thread
 from google import genai
@@ -10,35 +6,34 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
 
 # --- تنظیمات لاگ ---
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- متغیرهای محیطی ---
+# --- متغیرها ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_KEY")
+
+# دیتابیس موقت برای وضعیت AI کاربران (در حافظه)
+user_ai_enabled = {} 
 
 LANG_MAP = {
     "انگلیسی": "en", "آلمانی": "de", "فرانسوی": "fr", "عربی": "ar",
     "ترکی": "tr", "اسپانیایی": "es", "روسی": "ru", "ایتالیایی": "it", "فارسی": "fa"
 }
 
-# حافظه موقت برای وضعیت AI کاربران در پی‌وی
-user_ai_status = {}
-
-# --- تابع ترجمه هوشمند ---
-async def translate_text(text, target_lang_code):
+# --- تابع ترجمه ---
+async def translate_text(text, target_code):
     try:
         async with httpx.AsyncClient() as client:
-            url = f"https://api.mymemory.translated.net/get?q={text}&langpair=auto|{target_lang_code}"
-            response = await client.get(url, timeout=10.0)
-            data = response.json()
-            if "DISTINCT LANGUAGES" in str(data.get("responseDetails", "")):
-                return f"این متن در حال حاضر به زبان {target_lang_code} است."
-            if data.get("responseStatus") != 200:
-                pair = f"fa|{target_lang_code}" if target_lang_code != "fa" else "en|fa"
+            url = f"https://api.mymemory.translated.net/get?q={text}&langpair=auto|{target_code}"
+            resp = await client.get(url, timeout=10.0)
+            data = resp.json()
+            # اگر خطا داد یا زبان تکراری بود، Fallback به فارسی/انگلیسی
+            if resp.status_code != 200 or "DISTINCT" in str(data):
+                pair = f"fa|{target_code}" if target_code != "fa" else "en|fa"
                 url = f"https://api.mymemory.translated.net/get?q={text}&langpair={pair}"
-                response = await client.get(url, timeout=10.0)
-                data = response.json()
+                resp = await client.get(url, timeout=10.0)
+                data = resp.json()
             return data["responseData"]["translatedText"]
     except: return "⚠️ خطا در سرور ترجمه."
 
@@ -49,28 +44,29 @@ async def get_ai_response(user_text):
         response = client.models.generate_content(model="gemini-2.0-flash", contents=user_text)
         return response.text if response.text else "پاسخی دریافت نشد."
     except Exception as e:
-        if "429" in str(e): return "⏳ سهمیه AI تمام شده."
-        return "❌ خطا در اتصال به هوش مصنوعی."
+        if "429" in str(e): return "⏳ سهمیه Gemini تمام شد. از ترجمه استفاده کنید."
+        return "❌ اطلس فعلاً پاسخگو نیست."
 
-# --- دستور فعال/غیرفعال کردن AI در پی‌وی ---
-async def toggle_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- دستور /ai ---
+async def ai_toggle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    current_status = user_ai_status.get(user_id, False)
-    user_ai_status[user_id] = not current_status
+    # تغییر وضعیت (Toggle)
+    is_on = user_ai_enabled.get(user_id, False)
+    user_ai_enabled[user_id] = not is_on
     
-    status_text = "✅ هوش مصنوعی در پی‌وی فعال شد." if user_ai_status[user_id] else "❌ هوش مصنوعی در پی‌وی غیرفعال شد. حالا فقط ترجمه انجام می‌دهم."
-    await update.message.reply_text(status_text)
+    msg = "✅ هوش مصنوعی برای شما فعال شد." if user_ai_enabled[user_id] else "❌ هوش مصنوعی خاموش شد. فقط ترجمه انجام می‌دهم."
+    await update.message.reply_text(msg)
 
-# --- هندلر اصلی پیام‌ها ---
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- مدیریت پیام‌های متنی ---
+async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     
     msg_text = update.message.text
     user_id = update.effective_user.id
-    is_private = update.message.chat.type == "private"
+    chat_type = update.message.chat.type
     bot_obj = await context.bot.get_me()
 
-    # ۱. اولویت اول: ترجمه (همیشه و همه جا کار می‌کند)
+    # --- اولویت ۱: دستور ترجمه (در هر شرایطی) ---
     if "ترجمه" in msg_text:
         target_code, target_name = "fa", "فارسی"
         for k, v in LANG_MAP.items():
@@ -79,39 +75,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_to_tr = ""
         if update.message.reply_to_message:
             text_to_tr = update.message.reply_to_message.text
-        elif is_private:
+        elif chat_type == "private":
             text_to_tr = msg_text.replace("ترجمه", "").replace(target_name, "").strip()
         
         if text_to_tr:
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
             res = await translate_text(text_to_tr, target_code)
             await update.message.reply_text(f"✨ ترجمه به {target_name}:\n\n{res}")
-            return
+            return # توکن هدر نمی‌رود و چت تمام می‌شود
 
-    # ۲. اولویت دوم: هوش مصنوعی
-    should_respond_ai = False
+    # --- اولویت ۲: هوش مصنوعی (با فیلتر شدید) ---
+    should_ai_work = False
     
-    if is_private:
-        # در پی‌وی فقط اگر قبلاً با دستور /ai فعال شده باشد
-        if user_ai_status.get(user_id, False):
-            should_respond_ai = True
+    if chat_type == "private":
+        # در پی‌وی فقط اگر خودِ کاربر با دستور /ai روشن کرده باشد
+        if user_ai_enabled.get(user_id, False):
+            should_ai_work = True
     else:
-        # در گروه فقط با منشن یا ریپلای به بوت
+        # در گروه‌ها فقط با منشن یا ریپلای به بوت
         is_mentioned = f"@{bot_obj.username}" in msg_text
         is_reply_to_bot = (update.message.reply_to_message and update.message.reply_to_message.from_user.id == bot_obj.id)
         if is_mentioned or is_reply_to_bot:
-            should_respond_ai = True
+            should_ai_work = True
 
-    if should_respond_ai:
+    if should_ai_work:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         clean_text = msg_text.replace(f"@{bot_obj.username}", "").strip()
         reply = await get_ai_response(clean_text)
         await update.message.reply_text(reply)
 
-# --- وب‌سرور و اجرا ---
+# --- وب‌سرور و راه اندازی ---
 app = Flask(__name__)
 @app.route('/')
-def health(): return "OK", 200
+def health(): return "Atlas Online", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -123,7 +119,10 @@ if __name__ == "__main__":
     
     if BOT_TOKEN:
         application = Application.builder().token(BOT_TOKEN).build()
-        # اضافه کردن دستور /ai برای کنترل در پی‌وی
-        application.add_handler(CommandHandler("ai", toggle_ai))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        # هندلر دستورات
+        application.add_handler(CommandHandler("ai", ai_toggle_command))
+        # هندلر تمام پیام‌های متنی
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_messages))
+        
         application.run_polling(drop_pending_updates=True)
