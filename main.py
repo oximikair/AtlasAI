@@ -6,9 +6,10 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
 # ================= تنظیمات کلیدها (جایگزین کن) =================
-ELEVEN_KEY = "کلید_ای_پی_آی_یازده_لبز" 
-GEMINI_KEY = "کلید_ای_پی_آی_جمنای"
-BOT_TOKEN = "توکن_ربات_تلگرام"
+# رندر کلیدها را از تنظیمات پنل می‌خواند
+ELEVEN_KEY = os.getenv("ELEVEN_KEY")
+GEMINI_KEY = os.getenv("GEMINI_KEY")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 # ==========================================================
 
 # تنظیمات هوش مصنوعی جمنای
@@ -74,3 +75,4 @@ if __name__ == '__main__':
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     app.run_polling()
+
